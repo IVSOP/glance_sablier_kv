@@ -1,7 +1,17 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:slim-trixie AS build
+FROM rust:slim-trixie AS chef
+RUN cargo install cargo-chef --locked
 WORKDIR /app
+
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS build
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --locked --recipe-path recipe.json
 
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
