@@ -46,6 +46,9 @@ See [Sablier's webhook documentation](https://sablierapp.dev/features/webhooks/)
 
 ## API
 
+`GET /health` returns `200 OK` with the plain-text body `ok`, including before
+any webhooks have arrived. Use it for uptime monitoring.
+
 `GET /containers/{name}` returns the latest state as plain text: `started`,
 `stopped`, or `paused`. Unknown containers return `404`.
 

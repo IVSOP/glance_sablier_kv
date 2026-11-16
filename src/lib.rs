@@ -55,6 +55,7 @@ pub fn app() -> Router {
     let store: Store = Arc::default();
 
     Router::new()
+        .route("/health", get(health))
         .route("/webhooks/sablier", post(record_event))
         .route("/containers/{name}", get(container_state))
         .layer(DefaultBodyLimit::max(16 * 1024))
@@ -64,6 +65,10 @@ pub fn app() -> Router {
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
         .with_state(store)
+}
+
+async fn health() -> impl IntoResponse {
+    ([(header::CACHE_CONTROL, "no-store")], "ok")
 }
 
 async fn record_event(

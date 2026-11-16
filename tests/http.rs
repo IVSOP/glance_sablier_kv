@@ -49,6 +49,17 @@ async fn assert_state(app: &Router, name: &str, expected: &str) {
 }
 
 #[tokio::test]
+async fn health_succeeds_before_any_webhooks_arrive() {
+    let response = sablier_mini_kv::app()
+        .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(to_bytes(response.into_body(), 1024).await.unwrap(), "ok");
+}
+
+#[tokio::test]
 async fn unknown_container_returns_404() {
     let response = get(&sablier_mini_kv::app(), "unknown").await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
