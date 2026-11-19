@@ -18,6 +18,8 @@ COPY src ./src
 RUN cargo build --release --locked
 
 FROM debian:trixie-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 
 COPY --from=build /app/target/release/sablier_mini_kv /usr/local/bin/sablier_mini_kv

@@ -1,6 +1,6 @@
 services:
-  sablier-mini-kv:
-    image: ghcr.io/ivsop/sablier_mini_kv:${IMAGE_TAG:-latest}
+  glance-sablier-kv:
+    image: ghcr.io/ivsop/glance_sablier_kv:${IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
       LISTEN_ADDR: 0.0.0.0:3000

@@ -1,17 +1,26 @@
-use std::{error::Error, net::SocketAddr};
+use std::{error::Error, net::SocketAddr, path::PathBuf};
 
 use clap::Parser;
+use sablier_mini_kv::health_checks::HealthChecks;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
 #[command(
     version,
-    about = "Remember the latest container state from Sablier webhooks"
+    about = "Cache service health checks and the latest Sablier container state"
 )]
 struct Config {
     /// Address on which to serve HTTP requests.
     #[arg(long, env = "LISTEN_ADDR", default_value = "127.0.0.1:3000")]
     listen_addr: SocketAddr,
+
+    /// YAML file with Glance Monitor settings.
+    #[arg(long, env = "GLANCE_HEALTH_CONFIG")]
+    health_config: Option<PathBuf>,
+
+    /// Glance's dotenv file for variables referenced by the monitor settings.
+    #[arg(long, env = "GLANCE_ENV_FILE")]
+    env_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -29,12 +38,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
         .init();
 
+    let health_checks = config
+        .health_config
+        .as_deref()
+        .map(|path| HealthChecks::load(path, config.env_file.as_deref()))
+        .transpose()?;
+
     let listener = tokio::net::TcpListener::bind(config.listen_addr).await?;
     tracing::info!(address = %listener.local_addr()?, "listening");
 
-    axum::serve(listener, sablier_mini_kv::app())
+    let health_task = health_checks.map(|checks| tokio::spawn(async move { checks.run().await }));
+
+    let result = axum::serve(listener, sablier_mini_kv::app())
         .with_graceful_shutdown(shutdown_signal())
-        .await?;
+        .await;
+    if let Some(task) = health_task {
+        task.abort();
+    }
+    result?;
     Ok(())
 }
 

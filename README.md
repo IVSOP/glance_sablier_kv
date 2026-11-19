@@ -1,11 +1,12 @@
-# sablier_mini_kv
+# glance_sablier_kv
 
 Stores the latest container state received from Sablier webhooks and serves it
-through a small HTTP API. Data stays in memory and is lost on restart.
+through a small HTTP API. It can also run and cache Glance Monitor health checks.
+Both stores are in memory.
 
 ## Docker Compose
 
-Use the included [compose.yaml](compose.yaml), or add its `sablier-mini-kv`
+Use the included [compose.yaml](compose.yaml), or add its `glance-sablier-kv`
 service to your existing Compose project:
 
 ```sh
@@ -13,7 +14,7 @@ docker compose up -d --pull always
 ```
 
 The API is available at `http://127.0.0.1:3000`. Images are published to
-`ghcr.io/ivsop/sablier_mini_kv` for Linux amd64 and arm64.
+`ghcr.io/ivsop/glance_sablier_kv` for Linux amd64 and arm64.
 
 The included Compose file accepts these settings through the environment or `.env`:
 
@@ -36,13 +37,44 @@ Put both services on the same Docker network and add this to `sablier.yaml`:
 ```yaml
 webhooks:
   endpoints:
-    - url: http://sablier-mini-kv:3000/webhooks/sablier
+    - url: http://glance-sablier-kv:3000/webhooks/sablier
       events:
         - started
         - stopped
 ```
 
 See [Sablier's webhook documentation](https://sablierapp.dev/features/webhooks/).
+
+## Glance Monitor health checks
+
+Set `GLANCE_HEALTH_CONFIG` or pass `--health-config` to enable polling. Use the
+Glance YAML file that contains your Monitor widget. If Glance uses `$include`
+for the page, point the checker at that page file. You can also copy a Monitor
+widget's `cache` and `sites` into a standalone YAML file.
+
+```yaml
+cache: ${SERVICES_CACHE}
+sites:
+  - title: Jellyfin
+    url: https://jellyfin.example.com
+    check-url: http://${JELLYFIN_HOST}:8096/health
+    timeout: 3s
+```
+
+The checker resolves `${VARIABLE}` in URLs, cache and timeout values, titles, and
+Basic Auth credentials from the process environment. You can pass Glance's
+dotenv file with `GLANCE_ENV_FILE` or `--env-file` as a fallback. In Docker, use
+the same `env_file` as Glance, mount the YAML into the checker, and make the
+configured check URLs reachable from its network.
+
+The checker sends a GET to each `check-url` and falls back to `url`. It follows
+redirects, treats HTTP 200 and `alt-status-codes` as healthy, and honors
+`basic-auth` and `allow-insecure`. Requests default to three seconds with
+Glance's five-second client limit.
+
+Each Monitor's result is cached after the initial check and refreshed in the
+background after its `cache` duration elapses, including when services fail.
+The default cache lifetime is five minutes.
 
 ## API
 
@@ -56,7 +88,7 @@ any webhooks have arrived. Use it for uptime monitoring.
 curl http://localhost:3000/containers/my-nginx
 ```
 
-From another container on the same network, use `sablier-mini-kv:3000` as the host.
+From another container on the same network, use `glance-sablier-kv:3000` as the host.
 Names are case sensitive and must be URL-encoded when needed.
 
 `POST /webhooks/sablier` accepts JSON and returns `204`:

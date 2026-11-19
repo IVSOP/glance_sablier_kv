@@ -1,3 +1,5 @@
+pub mod health_checks;
+
 use std::{collections::HashMap, sync::Arc};
 
 use axum::{

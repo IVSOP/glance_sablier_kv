@@ -1,5 +1,5 @@
 services:
-  sablier-mini-kv:
-    image: sablier-mini-kv:local
+  glance-sablier-kv:
+    image: glance_sablier_kv:local
     build:
       context: .
