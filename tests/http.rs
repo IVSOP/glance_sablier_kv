@@ -4,19 +4,36 @@ use axum::{
     http::{Request, StatusCode, header},
     response::Response,
 };
-use serde_json::{Value, json};
+use serde::Serialize;
 use tower::ServiceExt;
 
-fn event(name: &str, event: &str, timestamp: &str) -> Value {
-    json!({"event": event, "instance": {"name": name}, "timestamp": timestamp})
+#[derive(Serialize)]
+struct Instance<'a> {
+    name: &'a str,
 }
 
-async fn post(app: &Router, payload: Value) -> Response {
+#[derive(Serialize)]
+struct Event<'a> {
+    event: &'a str,
+    instance: Instance<'a>,
+    timestamp: &'a str,
+}
+
+fn event(name: &str, event: &str, timestamp: &str) -> String {
+    serde_json::to_string(&Event {
+        event,
+        instance: Instance { name },
+        timestamp,
+    })
+    .unwrap()
+}
+
+async fn post(app: &Router, payload: impl Into<Body>) -> Response {
     app.clone()
         .oneshot(
             Request::post("/webhooks/sablier")
                 .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                .body(payload.into())
                 .unwrap(),
         )
         .await
@@ -123,8 +140,8 @@ async fn invalid_payloads_do_not_change_existing_state() {
         event("nginx", "invented", "2026-11-15T10:00:01Z"),
         event("nginx", "stopped", "not-a-timestamp"),
         event("   ", "stopped", "2026-11-15T10:00:01Z"),
-        json!({"event": "stopped", "instance": {"name": "nginx"}}),
-        json!({"event": "stopped", "timestamp": "2026-11-15T10:00:01Z"}),
+        r#"{"event":"stopped","instance":{"name":"nginx"}}"#.to_owned(),
+        r#"{"event":"stopped","timestamp":"2026-11-15T10:00:01Z"}"#.to_owned(),
     ] {
         assert_eq!(
             post(&app, payload).await.status(),
@@ -137,9 +154,12 @@ async fn invalid_payloads_do_not_change_existing_state() {
 #[tokio::test]
 async fn accepts_additional_fields_and_decodes_container_names() {
     let app = sablier_mini_kv::app();
-    let mut payload = event("my container/one", "started", "2026-11-15T10:00:00Z");
-    payload["future_field"] = json!({"anything": true});
-    payload["instance"]["id"] = json!("future-id");
+    let payload = r#"{
+        "event": "started",
+        "instance": {"name": "my container/one", "id": "future-id"},
+        "timestamp": "2026-11-15T10:00:00Z",
+        "future_field": {"anything": true}
+    }"#;
     assert_eq!(post(&app, payload).await.status(), StatusCode::NO_CONTENT);
     assert_state(&app, "my%20container%2Fone", "started").await;
 }

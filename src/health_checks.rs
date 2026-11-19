@@ -63,7 +63,7 @@ impl HealthChecks {
             clients: Clients {
                 secure: Client::builder().build()?,
                 insecure: Client::builder()
-                    .danger_accept_invalid_certs(true)
+                    .tls_danger_accept_invalid_certs(true)
                     .build()?,
             },
             monitors: monitors
