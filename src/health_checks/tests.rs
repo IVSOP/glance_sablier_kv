@@ -176,3 +176,70 @@ async fn reports_transport_errors_and_timeouts_alongside_other_sites() {
 
     server.abort();
 }
+
+#[tokio::test]
+async fn reports_sleeping_only_for_failed_probes_with_a_stop_event() {
+    let app = crate::app().unwrap();
+    for (name, event) in [
+        ("stopped", "stopped"),
+        ("started", "started"),
+        ("paused", "paused"),
+    ] {
+        let body = format!(
+            r#"{{"event":"{event}","instance":{{"name":"{name}"}},"timestamp":"2026-11-20T00:00:00Z"}}"#
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/webhooks/sablier")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    let unreachable = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let unavailable = unreachable.local_addr().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    drop(unreachable);
+    let available = listener.local_addr().unwrap();
+    let upstream = Router::new()
+        .route("/ok", get(|| async { StatusCode::OK }))
+        .route(
+            "/error",
+            get(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+        );
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let body = format!(
+        r#"{{"sites":[
+            {{"title":"Stopped","url":"http://{unavailable}","sablier-container":"stopped"}},
+            {{"title":"Paused","url":"http://{unavailable}","sablier-container":"paused"}},
+            {{"title":"Started","url":"http://{unavailable}","sablier-container":"started"}},
+            {{"title":"Unknown","url":"http://{unavailable}","sablier-container":"unknown"}},
+            {{"title":"Unmapped","url":"http://{unavailable}"}},
+            {{"title":"Reachable","url":"http://{available}/ok","sablier-container":"stopped"}},
+            {{"title":"Failure","url":"http://{available}/error","sablier-container":"stopped"}}
+        ]}}"#
+    );
+
+    let sites = response_sites(post_checks(&app, body).await).await;
+    let statuses: Vec<_> = sites.iter().map(|site| site.status.as_str()).collect();
+    assert_eq!(
+        statuses,
+        [
+            "sleeping",
+            "sleeping",
+            "unreachable",
+            "unreachable",
+            "unreachable",
+            "ok",
+            "http-error"
+        ]
+    );
+    assert_eq!(sites[5].code, Some(200));
+    assert_eq!(sites[6].code, Some(500));
+    server.abort();
+}

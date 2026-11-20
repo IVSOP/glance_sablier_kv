@@ -56,12 +56,14 @@ struct ContainerState {
 pub fn app() -> Result<Router, reqwest::Error> {
     let store: Store = Arc::default();
 
+    let checks = health_checks::router(Arc::clone(&store))?;
+
     Ok(Router::new()
         .route("/health", get(health))
         .route("/webhooks/sablier", post(record_event))
         .route("/containers/{name}", get(container_state))
         .with_state(store)
-        .merge(health_checks::router()?)
+        .merge(checks)
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(
             TraceLayer::new_for_http()

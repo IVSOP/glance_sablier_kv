@@ -5,6 +5,8 @@ use futures_util::future::join_all;
 use reqwest::Client;
 use serde::{Deserialize, Deserializer, Serialize, de};
 
+use super::{Event, Store};
+
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Deserialize)]
@@ -18,6 +20,7 @@ struct Site {
     title: String,
     url: String,
     check_url: Option<String>,
+    sablier_container: Option<String>,
     icon: Option<String>,
     #[serde(default = "default_timeout", deserialize_with = "deserialize_timeout")]
     timeout: Duration,
@@ -58,6 +61,7 @@ struct SiteHealth {
 enum HealthStatus {
     Ok { code: u16 },
     HttpError { code: u16 },
+    Sleeping,
     TimedOut,
     Unreachable { error: String },
 }
@@ -66,14 +70,16 @@ enum HealthStatus {
 struct Checker {
     secure: Client,
     insecure: Client,
+    store: Store,
 }
 
-pub(super) fn router() -> Result<Router, reqwest::Error> {
+pub(super) fn router(store: Store) -> Result<Router, reqwest::Error> {
     let checker = Checker {
         secure: Client::builder().build()?,
         insecure: Client::builder()
             .tls_danger_accept_invalid_certs(true)
             .build()?,
+        store,
     };
     Ok(Router::new()
         .route("/checks", post(check_sites))
@@ -111,7 +117,7 @@ impl Checker {
         }
 
         let start = Instant::now();
-        let status = match request.send().await {
+        let mut status = match request.send().await {
             Ok(response) => {
                 let code = response.status().as_u16();
                 if code == 200 || site.alt_status_codes.contains(&code) {
@@ -125,6 +131,20 @@ impl Checker {
                 error: error.without_url().to_string(),
             },
         };
+
+        if matches!(
+            status,
+            HealthStatus::TimedOut | HealthStatus::Unreachable { .. }
+        ) && let Some(container) = &site.sablier_container
+            && self
+                .store
+                .read()
+                .await
+                .get(container)
+                .is_some_and(|state| matches!(state.event, Event::Stopped | Event::Paused))
+        {
+            status = HealthStatus::Sleeping;
+        }
 
         SiteHealth {
             title: site.title,

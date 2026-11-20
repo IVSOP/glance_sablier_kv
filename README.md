@@ -20,6 +20,9 @@ For an existing Glance deployment, copy the widget from the
 [example configuration](examples/glance/glance.yml) and point its site entries
 at your services. Use `check-url` when the probe and the link use different
 addresses. Glance's `cache` setting controls how often it requests fresh results.
+For managed sites, set `sablier-container` to the container name. A failed
+probe without an HTTP response returns `sleeping` when Sablier last stopped
+or paused that container.
 
 ## Connect Sablier
 
