@@ -1,0 +1,21 @@
+pages:
+  - name: Home
+    columns:
+      - size: full
+        widgets:
+          - type: custom-api
+            title: Services
+            cache: 5m
+            url: http://glance-sablier-kv:3000/checks
+            method: POST
+            body:
+              sites:
+                - title: Glance
+                  url: /
+                  check-url: http://glance:8080/api/healthz
+                - title: Sablier KV
+                  url: http://glance-sablier-kv:3000/health
+            template: |
+              {{ range .JSON.Array "sites" }}
+                <p>{{ .String "title" }} · {{ .String "status" }}</p>
+              {{ end }}
