@@ -1,8 +1,7 @@
 # glance_sablier_kv
 
 Stores the latest container state received from Sablier webhooks and serves it
-through a small HTTP API. It can also run and cache Glance Monitor health checks.
-Both stores are in memory.
+through a small HTTP API. It also runs on-demand health checks for Glance.
 
 ## Docker Compose
 
@@ -45,36 +44,39 @@ webhooks:
 
 See [Sablier's webhook documentation](https://sablierapp.dev/features/webhooks/).
 
-## Glance Monitor health checks
+## Glance health checks
 
-Set `GLANCE_HEALTH_CONFIG` or pass `--health-config` to enable polling. Use the
-Glance YAML file that contains your Monitor widget. If Glance uses `$include`
-for the page, point the checker at that page file. You can also copy a Monitor
-widget's `cache` and `sites` into a standalone YAML file.
+`POST /checks` accepts the sites to check in a JSON body. A Glance `custom-api`
+widget can send the whole list in one request and use its `cache` setting to
+control how often it asks for fresh results.
 
 ```yaml
-cache: ${SERVICES_CACHE}
-sites:
-  - title: Jellyfin
-    url: https://jellyfin.example.com
-    check-url: http://${JELLYFIN_HOST}:8096/health
-    timeout: 3s
+- type: custom-api
+  title: Services
+  cache: 5m
+  url: http://glance-sablier-kv:3000/checks
+  method: POST
+  body:
+    sites:
+      - title: Jellyfin
+        url: https://jellyfin.example.com
+        check-url: http://jellyfin:8096/health
+  template: |
+    {{ range .JSON.Array "sites" }}
+      <p>{{ .String "title" }} · {{ .String "status" }}</p>
+    {{ end }}
 ```
 
-The checker resolves `${VARIABLE}` in URLs, cache and timeout values, titles, and
-Basic Auth credentials from the process environment. You can pass Glance's
-dotenv file with `GLANCE_ENV_FILE` or `--env-file` as a fallback. In Docker, use
-the same `env_file` as Glance, mount the YAML into the checker, and make the
-configured check URLs reachable from its network.
+The checker sends a GET to each `check-url`, falling back to `url`. It follows
+redirects and treats HTTP 200 and any configured `alt-status-codes` as healthy.
+Sites can also specify `basic-auth`, `allow-insecure`, and `timeout` (default
+`3s`). The batch has 4.5 seconds to finish so Glance can receive the response
+within its five-second HTTP timeout.
 
-The checker sends a GET to each `check-url` and falls back to `url`. It follows
-redirects, treats HTTP 200 and `alt-status-codes` as healthy, and honors
-`basic-auth` and `allow-insecure`. Requests default to three seconds with
-Glance's five-second client limit.
-
-Each Monitor's result is cached after the initial check and refreshed in the
-background after its `cache` duration elapses, including when services fail.
-The default cache lifetime is five minutes.
+The response includes a `sites` array in request order. Each entry contains
+`title`, `url`, any supplied `icon`, `response-time-ms`, and a `status` of
+`ok`, `http-error`, `timed-out`, or `unreachable`. HTTP responses also include
+`code`, and unreachable sites include an `error` message.
 
 ## API
 

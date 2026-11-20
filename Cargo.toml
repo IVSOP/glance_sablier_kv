@@ -9,10 +9,8 @@ chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 dotenvy = "0.15.7"
 futures-util = "0.3"
-regex = "1"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde-saphyr = { version = "2.2.0", default-features = false, features = ["deserialize"] }
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 tower-http = { version = "0.7.1", features = ["trace"] }
 tracing = "0.1.44"

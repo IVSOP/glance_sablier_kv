@@ -1,4 +1,4 @@
-pub mod health_checks;
+mod health_checks;
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -53,20 +53,21 @@ struct ContainerState {
 }
 
 /// Build a service with its own empty, process-local store.
-pub fn app() -> Router {
+pub fn app() -> Result<Router, reqwest::Error> {
     let store: Store = Arc::default();
 
-    Router::new()
+    Ok(Router::new()
         .route("/health", get(health))
         .route("/webhooks/sablier", post(record_event))
         .route("/containers/{name}", get(container_state))
+        .with_state(store)
+        .merge(health_checks::router()?)
         .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
-        )
-        .with_state(store)
+        ))
 }
 
 async fn health() -> impl IntoResponse {

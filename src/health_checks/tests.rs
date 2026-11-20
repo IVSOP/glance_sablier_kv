@@ -1,84 +1,59 @@
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicU16, AtomicUsize, Ordering},
-    },
-    time::Duration,
+use std::sync::{
+    Arc,
+    atomic::{AtomicU16, AtomicUsize, Ordering},
 };
 
 use axum::{
     Router,
-    http::{HeaderMap, StatusCode, header},
-    response::Redirect,
+    body::{Body, to_bytes},
+    http::{HeaderMap, Request, StatusCode, header},
+    response::{Redirect, Response},
     routing::get,
 };
+use serde::Deserialize;
 use tokio::net::TcpListener;
+use tower::ServiceExt;
 
-use super::{HealthChecks, HealthStatus, Snapshot, config};
+#[derive(Deserialize)]
+struct Results {
+    sites: Vec<ResultSite>,
+}
 
-#[test]
-fn reads_glance_page_settings_and_expands_monitor_variables() {
-    let monitors = config::parse(
-        r#"
-- name: Home
-  columns:
-    - size: full
-      widgets:
-        - type: dns-stats
-          password: ${UNRELATED_PASSWORD}
-        - type: split-column
-          widgets:
-            - type: monitor
-              cache: ${CACHE}
-              sites:
-                - title: Example
-                  url: https://example.com
-                  check-url: http://${HOST}/${PATH}
-                  timeout: ${TIMEOUT}
-                  alt-status-codes: [401, 204]
-                  allow-insecure: true
-                  basic-auth:
-                    username: user
-                    password: "${PASSWORD}"
-                - title: Uses display URL
-                  url: https://example.com/other
-"#,
-        |name| {
-            match name {
-                "CACHE" => Some("1m"),
-                "HOST" => Some("service"),
-                "PATH" => Some("health"),
-                "TIMEOUT" => Some("10s"),
-                "PASSWORD" => Some("a: \"quoted\" password"),
-                _ => None,
-            }
-            .map(str::to_owned)
-        },
-    )
-    .unwrap();
+#[derive(Debug, Deserialize)]
+struct ResultSite {
+    title: String,
+    url: String,
+    icon: Option<String>,
+    status: String,
+    code: Option<u16>,
+}
 
-    assert_eq!(monitors.len(), 1);
-    assert_eq!(monitors[0].cache, Duration::from_secs(60));
-    let sites = &monitors[0].sites;
-    assert_eq!(sites[0].check_url.as_str(), "http://service/health");
-    assert_eq!(sites[0].timeout, Duration::from_secs(5));
-    assert_eq!(sites[0].alt_status_codes, [401, 204]);
-    assert!(sites[0].allow_insecure);
-    assert_eq!(
-        sites[0].basic_auth.as_ref().unwrap().password,
-        "a: \"quoted\" password"
-    );
-    assert_eq!(sites[1].check_url.as_str(), "https://example.com/other");
-    assert_eq!(sites[1].timeout, Duration::from_secs(3));
+async fn post_checks(app: &Router, body: impl Into<Body>) -> Response {
+    app.clone()
+        .oneshot(
+            Request::post("/checks")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(body.into())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+async fn response_sites(response: Response) -> Vec<ResultSite> {
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
+    serde_json::from_slice::<Results>(&body).unwrap().sites
 }
 
 #[tokio::test]
-async fn polls_and_caches_http_results() {
+async fn checks_sites_only_when_requested_and_returns_fresh_results() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let code = Arc::new(AtomicU16::new(204));
     let requests = Arc::new(AtomicUsize::new(0));
-    let app = Router::new()
+    let upstream = Router::new()
         .route("/redirect", get(|| async { Redirect::to("/health") }))
         .route(
             "/health",
@@ -102,79 +77,71 @@ async fn polls_and_caches_http_results() {
                 }
             }),
         )
-        .route(
-            "/slow",
-            get(|| async {
-                tokio::time::sleep(Duration::from_secs(60)).await;
-                StatusCode::OK
-            }),
-        );
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let mut monitors = config::parse(
-        &format!(
-            r#"
-cache: 1s
-sites:
-  - title: Protected
-    url: http://{address}/unused
-    check-url: http://{address}/redirect
-    alt-status-codes: [204]
-    basic-auth:
-      username: user
-      password: pass
-  - title: Slow
-    url: http://{address}/slow
-"#
-        ),
-        |_| None,
-    )
-    .unwrap();
-    monitors[0].sites[1].timeout = Duration::from_millis(75);
-    let checks = Arc::new(HealthChecks::new(monitors).unwrap());
-    assert!(checks.snapshots().await.is_empty());
-    let worker = tokio::spawn({
-        let checks = Arc::clone(&checks);
-        async move { checks.run().await }
-    });
+        .route("/fallback", get(|| async { StatusCode::OK }));
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let app = crate::app().unwrap();
+    assert_eq!(requests.load(Ordering::Relaxed), 0);
 
-    let first = wait_for_snapshot(&checks, 204).await;
-    assert_eq!(
-        first.sites[0].status,
-        HealthStatus::Http {
-            code: 204,
-            ok: true
-        }
+    let body = format!(
+        r#"{{
+            "sites": [{{
+                "title": "Protected",
+                "url": "https://example.com/",
+                "icon": "/assets/example.svg",
+                "check-url": "http://{address}/redirect",
+                "alt-status-codes": [204],
+                "basic-auth": {{"username": "user", "password": "pass"}}
+            }}, {{
+                "title": "Fallback",
+                "url": "http://{address}/fallback"
+            }}]
+        }}"#
     );
-    assert_eq!(first.sites[1].status, HealthStatus::TimedOut);
-    code.store(503, Ordering::Relaxed);
-    assert_eq!(checks.snapshots().await[0].checked_at, first.checked_at);
+    let sites = response_sites(post_checks(&app, body.clone()).await).await;
+    assert_eq!(sites[0].title, "Protected");
+    assert_eq!(sites[0].url, "https://example.com/");
+    assert_eq!(sites[0].icon.as_deref(), Some("/assets/example.svg"));
+    assert_eq!(sites[0].status, "ok");
+    assert_eq!(sites[0].code, Some(204));
+    assert_eq!(sites[1].title, "Fallback");
+    assert_eq!(sites[1].status, "ok");
+    assert_eq!(sites[1].code, Some(200));
     assert_eq!(requests.load(Ordering::Relaxed), 1);
 
-    let next = wait_for_snapshot(&checks, 503).await;
-    assert_eq!(
-        next.sites[0].status,
-        HealthStatus::Http {
-            code: 503,
-            ok: false
-        }
-    );
+    code.store(503, Ordering::Relaxed);
+    let sites = response_sites(post_checks(&app, body).await).await;
+    assert_eq!(sites[0].status, "http-error");
+    assert_eq!(sites[0].code, Some(503));
     assert_eq!(requests.load(Ordering::Relaxed), 2);
 
-    worker.abort();
     server.abort();
 }
 
-async fn wait_for_snapshot(checks: &HealthChecks, expected: u16) -> Snapshot {
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(snapshot) = checks.snapshots().await.pop()
-                && matches!(snapshot.sites[0].status, HealthStatus::Http { code, .. } if code == expected)
-            {
-                break snapshot;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("expected a completed snapshot with the requested status")
+#[tokio::test]
+async fn reports_transport_errors_and_timeouts_alongside_other_sites() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream = Router::new().route(
+        "/slow",
+        get(|| async {
+            std::future::pending::<()>().await;
+            StatusCode::OK
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let body = format!(
+        r#"{{
+            "sites": [
+                {{"title": "Slow", "url": "http://{address}/slow", "timeout": "1s"}},
+                {{"title": "Invalid URL", "url": "not an HTTP URL"}}
+            ]
+        }}"#
+    );
+
+    let sites = response_sites(post_checks(&crate::app().unwrap(), body).await).await;
+    assert_eq!(sites[0].status, "timed-out");
+    assert_eq!(sites[1].status, "unreachable");
+    assert!(sites.iter().all(|site| site.code.is_none()));
+
+    server.abort();
 }
