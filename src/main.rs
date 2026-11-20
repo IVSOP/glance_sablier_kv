@@ -1,7 +1,10 @@
-use std::{error::Error, net::SocketAddr};
+use std::{error::Error, future::IntoFuture, io, net::SocketAddr, time::Duration};
 
 use clap::Parser;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
+
+const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
 #[command(
@@ -33,34 +36,51 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let listener = tokio::net::TcpListener::bind(config.listen_addr).await?;
     tracing::info!(address = %listener.local_addr()?, "listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let shutdown = CancellationToken::new();
+    let signal_task = tokio::spawn(cancel_on_signal(shutdown.clone()));
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown.clone().cancelled_owned())
+        .into_future();
+    tokio::pin!(server);
+
+    let result = tokio::select! {
+        result = &mut server => result,
+        () = shutdown.cancelled() => {
+            tracing::info!("shutting down");
+            match tokio::time::timeout(SHUTDOWN_GRACE_PERIOD, &mut server).await {
+                Ok(result) => result,
+                Err(_) => {
+                    tracing::warn!("shutdown grace period expired");
+                    Ok(())
+                }
+            }
+        }
+    };
+
+    signal_task.abort();
+    result?;
     Ok(())
 }
 
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        if let Err(error) = tokio::signal::ctrl_c().await {
-            tracing::error!(%error, "failed to listen for Ctrl-C");
-        }
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut signal) => {
-                signal.recv().await;
-            }
-            Err(error) => tracing::error!(%error, "failed to listen for SIGTERM"),
-        }
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tokio::select! {
-        () = ctrl_c => {},
-        () = terminate => {},
+async fn cancel_on_signal(shutdown: CancellationToken) {
+    if let Err(error) = shutdown_signal().await {
+        tracing::error!(%error, "failed to listen for a shutdown signal");
     }
-    tracing::info!("shutting down");
+    shutdown.cancel();
+}
+
+async fn shutdown_signal() -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut terminate = signal(SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await
 }

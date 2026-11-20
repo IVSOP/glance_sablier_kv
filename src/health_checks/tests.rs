@@ -1,6 +1,9 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicU16, AtomicUsize, Ordering},
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU16, AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
 
 use axum::{
@@ -13,6 +16,8 @@ use axum::{
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use tower::ServiceExt;
+
+use super::{CheckRequest, DEFAULT_TIMEOUT};
 
 #[derive(Deserialize)]
 struct Results {
@@ -45,6 +50,32 @@ async fn response_sites(response: Response) -> Vec<ResultSite> {
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     let body = to_bytes(response.into_body(), 16 * 1024).await.unwrap();
     serde_json::from_slice::<Results>(&body).unwrap().sites
+}
+
+#[test]
+fn parses_explicit_and_default_timeouts() {
+    let request: CheckRequest = serde_json::from_str(
+        r#"{"sites": [
+            {"title": "Default", "url": "http://localhost"},
+            {"title": "Zero", "url": "http://localhost", "timeout": "0s"},
+            {"title": "Glance", "url": "http://localhost", "timeout": "2s"},
+            {"title": "Milliseconds", "url": "http://localhost", "timeout": "250ms"},
+            {"title": "Long", "url": "http://localhost", "timeout": "5m"}
+        ]}"#,
+    )
+    .unwrap();
+
+    let timeouts: Vec<_> = request.sites.into_iter().map(|site| site.timeout).collect();
+    assert_eq!(
+        timeouts,
+        [
+            DEFAULT_TIMEOUT,
+            DEFAULT_TIMEOUT,
+            Duration::from_secs(2),
+            Duration::from_millis(250),
+            Duration::from_secs(300),
+        ],
+    );
 }
 
 #[tokio::test]

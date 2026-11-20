@@ -1,4 +1,14 @@
 services:
+  glance:
+    image: glanceapp/glance:v0.8.8
+    restart: unless-stopped
+    depends_on:
+      - glance-sablier-kv
+    volumes:
+      - ./examples/glance:/app/config:ro
+    ports:
+      - "127.0.0.1:${GLANCE_PORT:-8080}:8080"
+
   glance-sablier-kv:
     image: ghcr.io/ivsop/glance_sablier_kv:${IMAGE_TAG:-latest}
     restart: unless-stopped

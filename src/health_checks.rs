@@ -1,22 +1,11 @@
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use axum::{Json, Router, extract::State, http::header, response::IntoResponse, routing::post};
 use futures_util::future::join_all;
 use reqwest::Client;
 use serde::{Deserialize, Deserializer, Serialize, de};
-use tokio::{
-    sync::Semaphore,
-    time::{Instant as TokioInstant, timeout_at},
-};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(3);
-const CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
-// Glance's Custom API client waits at most five seconds for the entire response.
-const BATCH_TIMEOUT: Duration = Duration::from_millis(4500);
-const MAX_CONCURRENT_CHECKS: usize = 20;
 
 #[derive(Deserialize)]
 struct CheckRequest {
@@ -77,7 +66,6 @@ enum HealthStatus {
 struct Checker {
     secure: Client,
     insecure: Client,
-    concurrent_checks: Arc<Semaphore>,
 }
 
 pub(super) fn router() -> Result<Router, reqwest::Error> {
@@ -86,7 +74,6 @@ pub(super) fn router() -> Result<Router, reqwest::Error> {
         insecure: Client::builder()
             .tls_danger_accept_invalid_certs(true)
             .build()?,
-        concurrent_checks: Arc::new(Semaphore::new(MAX_CONCURRENT_CHECKS)),
     };
     Ok(Router::new()
         .route("/checks", post(check_sites))
@@ -97,14 +84,7 @@ async fn check_sites(
     State(checker): State<Checker>,
     Json(request): Json<CheckRequest>,
 ) -> impl IntoResponse {
-    let deadline = TokioInstant::now() + BATCH_TIMEOUT;
-    let sites = join_all(
-        request
-            .sites
-            .into_iter()
-            .map(|site| checker.check(site, deadline)),
-    )
-    .await;
+    let sites = join_all(request.sites.into_iter().map(|site| checker.check(site))).await;
     (
         [(header::CACHE_CONTROL, "no-store")],
         Json(CheckResponse { sites }),
@@ -112,29 +92,7 @@ async fn check_sites(
 }
 
 impl Checker {
-    async fn check(&self, site: Site, deadline: TokioInstant) -> SiteHealth {
-        let start = Instant::now();
-        let status = timeout_at(deadline, async {
-            let _permit = self
-                .concurrent_checks
-                .acquire()
-                .await
-                .expect("the check semaphore is never closed");
-            self.probe(&site).await
-        })
-        .await
-        .unwrap_or(HealthStatus::TimedOut);
-
-        SiteHealth {
-            title: site.title,
-            url: site.url,
-            icon: site.icon,
-            status,
-            response_time_ms: start.elapsed().as_millis(),
-        }
-    }
-
-    async fn probe(&self, site: &Site) -> HealthStatus {
+    async fn check(&self, site: Site) -> SiteHealth {
         let client = if site.allow_insecure {
             &self.insecure
         } else {
@@ -152,7 +110,8 @@ impl Checker {
             request = request.basic_auth(&auth.username, Some(&auth.password));
         }
 
-        match request.send().await {
+        let start = Instant::now();
+        let status = match request.send().await {
             Ok(response) => {
                 let code = response.status().as_u16();
                 if code == 200 || site.alt_status_codes.contains(&code) {
@@ -165,6 +124,14 @@ impl Checker {
             Err(error) => HealthStatus::Unreachable {
                 error: error.without_url().to_string(),
             },
+        };
+
+        SiteHealth {
+            title: site.title,
+            url: site.url,
+            icon: site.icon,
+            status,
+            response_time_ms: start.elapsed().as_millis(),
         }
     }
 }
@@ -175,23 +142,11 @@ fn default_timeout() -> Duration {
 
 fn deserialize_timeout<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
     let value = String::deserialize(deserializer)?;
-    let invalid = || de::Error::custom("timeout must be an integer followed by s, m, h, or d");
-    let seconds_per_unit = match value.as_bytes().last() {
-        Some(b's') => 1,
-        Some(b'm') => 60,
-        Some(b'h') => 60 * 60,
-        Some(b'd') => 24 * 60 * 60,
-        _ => return Err(invalid()),
-    };
-    let amount = &value[..value.len() - 1];
-    if !amount.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(invalid());
-    }
-    let amount = amount.parse::<u64>().map_err(|_| invalid())?;
-    if amount == 0 {
+    let duration = humantime::parse_duration(&value).map_err(de::Error::custom)?;
+    if duration.is_zero() {
         return Ok(DEFAULT_TIMEOUT);
     }
-    Ok(Duration::from_secs(amount.saturating_mul(seconds_per_unit)).min(CLIENT_TIMEOUT))
+    Ok(duration)
 }
 
 #[cfg(test)]
